@@ -1,0 +1,356 @@
+from PyQt6.QtWidgets import QWidget, QApplication, QMessageBox, QVBoxLayout, QScrollArea, QDialog, QFileDialog
+from PyQt6 import uic
+from PyQt6.QtGui import QPixmap, QDoubleValidator, QIntValidator
+import sys, os, shutil, random, string
+from DBConnection import DBConnection
+
+class Authorization(QWidget):
+    def __init__(self):
+        super().__init__()
+        uic.loadUi('uic/authoriz.ui', self)
+        self.enterButton.clicked.connect(self.authorization)
+        self.guestButton.clicked.connect(self.guest)
+        self.db = DBConnection()
+
+
+    def authorization(self):
+        if not self.loginEdit.text() or not self.passwordEdit.text():
+            QMessageBox.warning(self, 'Ошибка!', 'Заполните все поля!')
+            return
+        self.login = self.loginEdit.text()
+        self.password = self.passwordEdit.text()
+        self.user = self.db.authorization(self.login, self.password)
+        if self.user:
+            self.new_window = Window(self, self.user, self.db)
+            self.close()
+            self.new_window.show()
+        else:
+            self.loginEdit.clear()
+            self.passwordEdit.clear()
+            self.loginEdit.setFocus()
+            QMessageBox.warning(self, 'Ошибка!', 'Неверный логин или пароль!')
+
+    def guest(self):
+        self.new_window = Window(self, None, self.db)
+        self.close()
+        self.new_window.show()
+
+class Window(QWidget):
+    def __init__(self, first_window, user, db):
+        super().__init__()
+        uic.loadUi('uic/main_window.ui', self)
+        self.db = db
+
+        self.exitButton.clicked.connect(self.exit)
+        self.addProductButton.clicked.connect(self.addProduct)
+        if user:
+            self.user = user
+            self.FIO = self.user['FIO']
+            self.role = self.user['role']
+            self.label.setText(f'{self.FIO}')
+        else:
+            self.role = 'Гость'
+
+        self.addProductButton.setVisible(self.role == 'Администратор')
+        self.searchLineEdit.setVisible(self.role == 'Администратор' or self.role == 'Менеджер')
+        self.sortComboBox.setVisible(self.role == 'Администратор' or self.role == 'Менеджер')
+        self.supplierComboBox.setVisible(self.role == 'Администратор' or self.role == 'Менеджер')
+
+        self.first_window = first_window
+        self.product = self.db.get_products()
+        # Вывод товаров из БД
+        self.scrollArea = QScrollArea(self)
+        self.scrollArea.setGeometry(30, 30, 1180, 510)
+        self.scrollArea.setWidgetResizable(True)
+
+        self.container = QWidget()
+        self.layout = QVBoxLayout(self.container)
+        self.layout.setSpacing(10)
+        self.layout.setContentsMargins(5, 5, 5, 5)
+
+        for row in self.product:
+            card = ProductCard(row, self.db, self)
+            card.setMinimumHeight(220)
+            self.layout.addWidget(card)
+        self.layout.addStretch()
+        self.scrollArea.setWidget(self.container)
+
+        # Сортировка,фильтр и поиск
+        self.supplierComboBox.addItem('Все поставщики')
+        self.supplierComboBox.setCurrentIndex(0)
+        self.suppliers = self.db.get_suppliers()
+        for row in self.suppliers:
+            self.supplierComboBox.addItem(row['name'])
+
+        self.sortComboBox.addItem('По возрастанию')
+        self.sortComboBox.addItem('По убыванию')
+
+        self.searchLineEdit.textChanged.connect(self.update_display)
+        self.supplierComboBox.currentIndexChanged.connect(self.update_display)
+        self.sortComboBox.currentIndexChanged.connect(self.update_display)
+
+    def update_display(self):
+        self.product = self.db.get_products()
+        # Поиск
+        self.text = self.searchLineEdit.text().lower()
+        if not self.text:
+            self.filtered = self.product
+        else:
+            self.filtered = []
+            for product in self.product:
+                if self.text in product['name'].lower() \
+                or self.text in product['unit'].lower() \
+                or self.text in product['supplierName'].lower() \
+                or self.text in product['producerName'].lower() \
+                or self.text in product['productCategory'].lower() \
+                or self.text in product['description'].lower():
+                    self.filtered.append(product)
+
+        # Фильтрация по поставщику
+        self.new_filtered = []
+        self.supplier = self.supplierComboBox.currentText()
+        if self.supplier != 'Все поставщики':
+            for row in self.filtered:
+                if row['supplierName'] == self.supplier:
+                    self.new_filtered.append(row)
+            self.filtered = self.new_filtered
+
+        # Сортировка по количеству на складе
+        self.sort_order = self.sortComboBox.currentText()
+        if self.sort_order == 'По возрастанию':
+            self.filtered.sort(key=lambda x: int(x['count']))
+        elif self.sort_order == 'По убыванию':
+            self.filtered.sort(key=lambda x: int(x['count']), reverse=True)
+
+        # Вывод новых карточек
+        self.clear_layout(self.layout)
+
+        for row in self.filtered:
+            card = ProductCard(row, self.db, self)
+            card.setMinimumHeight(220)
+            self.layout.addWidget(card)
+        self.layout.addStretch()
+
+    def clear_layout(self, layout):
+        while layout.count():
+            self.item = layout.takeAt(0)
+            self.widget = self.item.widget()
+            if self.widget:
+                self.widget.deleteLater()
+
+    def exit(self):
+        self.close()
+        self.first_window.loginEdit.clear()
+        self.first_window.passwordEdit.clear()
+        self.first_window.loginEdit.setFocus()
+        self.first_window.show()
+
+    def addProduct(self):
+        self.dialog = AddAndEditProduct(self.db)
+        self.dialog.exec()
+        self.update_display()
+
+
+class ProductCard(QWidget):
+    def __init__(self, product, db, parent=None):
+        super().__init__(parent)
+        uic.loadUi('uic/product.ui', self)
+        self.db = db
+        self.parent = parent
+        self.product = product
+        if self.product['photoName'] != '':
+            image_path = f"picture/{self.product['photoName']}"
+            pixmap = QPixmap(image_path)
+            self.photoLabel.setPixmap(pixmap)
+        self.labelCategoryName.setText(f"{self.product['productCategory']} | {self.product['name']}")
+        self.descriptionLabel.setText(f"Описание товара: {self.product['description']}")
+        self.producerLabel.setText(f"Производитель: {self.product['producerName']}")
+        self.supplierLabel.setText(f"Поставщик: {self.product['supplierName']}")
+        self.unitLabel.setText(f"Единица измерения: {self.product['unit']}")
+        self.countLabel.setText(f"Количество на складе: {self.product['count']}")
+        self.discountLabel.setText(f"Действующая скидка: {self.product['discount']}%")
+
+        if self.product['discount'] > 0:
+            self.final_price = self.product['price'] * (1 - self.product['discount'] / 100)
+            self.priceLabel.setText(f"Цена: <s style='color:red;'> {self.product['price']:.2f} </s> <span='color:black;'>{self.final_price:.2f}</span>")
+        else:
+            self.priceLabel.setText(f"Цена: {self.product['price']}")
+
+        if self.product['discount'] > 15:
+            self.setStyleSheet('background-color: #2E8B57')
+
+        if self.product['count'] == 0:
+            self.setStyleSheet('background-color: lightblue')
+
+    # Редактирование товара
+    def mousePressEvent(self, event):
+        if self.parent.role != 'Администратор':
+            return
+        self.dialog = AddAndEditProduct(self.db, self.product)
+        self.dialog.exec()
+        self.parent.update_display()
+
+class AddAndEditProduct(QDialog):
+    def __init__(self, db, product=None):
+        super().__init__()
+        uic.loadUi('uic/addAndEditProduct.ui', self)
+        self.priceEdit.setValidator(QDoubleValidator(0.0, 10_000_000.0, 2))
+        self.countEdit.setValidator(QIntValidator(0, 10_000_000))
+        self.discountEdit.setValidator(QIntValidator(0, 100))
+        self.exitButton.clicked.connect(self.close)
+        self.photoLabel.mousePressEvent = self.on_photo_clicked
+        self.addButton.clicked.connect(self.add_edit_product)
+        self.editButton.clicked.connect(self.add_edit_product)
+        self.deleteButton.clicked.connect(self.delete_product)
+        self.db = db
+        self.product = product
+        self.file_path = ''
+
+        self.suppliers = self.db.get_producers()
+        for row in self.suppliers:
+            self.producerComboBox.addItem(row['name'])
+        self.categoryComboBox.addItem('Женская обувь')
+        self.categoryComboBox.addItem('Мужская обувь')
+
+        if self.product:
+            self.setWindowTitle('Редактирование товара')
+            self.addButton.setVisible(False)
+            # Заполнение данными
+            self.setStyleSheet('background-color: white')
+            if self.product['photoName'] != '':
+                image_path = f"picture/{self.product['photoName']}"
+                pixmap = QPixmap(image_path)
+                self.photoLabel.setPixmap(pixmap)
+
+            self.index = self.categoryComboBox.findText(self.product['productCategory'])
+            self.categoryComboBox.setCurrentIndex(self.index)
+
+            self.index = self.producerComboBox.findText(self.product['producerName'])
+            self.producerComboBox.setCurrentIndex(self.index)
+
+            self.nameEdit.setText(self.product['name'])
+            self.descriptionEdit.setText(self.product['description'])
+            self.supplierEdit.setText(self.product['supplierName'])
+            self.priceEdit.setText(str(self.product['price']))
+            self.unitEdit.setText(self.product['unit'])
+            self.countEdit.setText(str(self.product['count']))
+            self.discountEdit.setText(str(self.product['discount']))
+        else:
+            self.setWindowTitle('Добавление товара')
+            self.editButton.setVisible(False)
+            self.deleteButton.setVisible(False)
+
+    def add_edit_product(self):
+        self.name = self.nameEdit.text()
+        self.description = self.descriptionEdit.toPlainText()
+        self.producer = self.producerComboBox.currentText()
+        self.category = self.categoryComboBox.currentText()
+        self.supplier = self.supplierEdit.text()
+        self.price = self.priceEdit.text()
+        self.unit = self.unitEdit.text()
+        self.count = self.countEdit.text()
+        self.discount = self.discountEdit.text()
+        if not self.name or not self.description or not self.producer or not self.category or not self.supplier or not self.price or not self.unit or not self.count or not self.discount:
+            QMessageBox.warning(self, 'Ошибка!', 'Заполните все поля!')
+            return
+
+        self.producerDB = self.db.get_producerID_by_name(self.producer)
+        self.producerID = self.producerDB['id']
+        self.supplierDB = self.db.get_supplierID_by_name(self.supplier)
+        if not self.supplierDB:
+            self.db.add_supplier(self.supplier)
+            self.supplierDB = self.db.get_supplierID_by_name(self.supplier)
+        self.supplierID = self.supplierDB['id']
+        self.photo = self.save_photo_to_project()
+
+        # Изменение или добавление
+        if self.product:
+            self.reply = QMessageBox.question(self, 'Подтверждение', 'Вы уверены, что хотите изменить продукт?',
+                                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if self.reply == QMessageBox.StandardButton.No:
+                return
+
+            self.article = self.product['article']
+            if self.photo == None:
+                self.photo = self.product['photoName']
+            self.db.edit_product(self.name, self.unit, self.price, self.supplierID, self.producerID, self.category, self.discount, self.count, self.description, self.photo, self.article)
+            QMessageBox.information(self, 'Успех!', 'Продукт успешно изменен')
+        else:
+            self.reply = QMessageBox.question(self, 'Подтверждение', 'Вы уверены, что хотите добавить продукт?',
+                                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if self.reply == QMessageBox.StandardButton.No:
+                return
+            # генерация артикула
+            self.letters = string.ascii_uppercase
+            self.digits = string.digits
+            while True:
+                self.article = (
+                    random.choice(self.letters) +
+                    ''.join(random.choices(self.digits, k=3)) +
+                    random.choice(self.letters) +
+                    random.choice(self.digits)
+                )
+                self.zaniato = self.db.check_article(self.article)
+                if not self.zaniato:
+                    break
+            if self.photo == None:
+                self.photo = ''
+            self.db.add_product(self.article, self.name, self.unit, self.price, self.supplierID, self.producerID, self.category, self.discount, self.count, self.description, self.photo)
+            QMessageBox.information(self, 'Успех!', 'Продукт успешно добавлен')
+        self.close()
+
+    def delete_product(self):
+        self.reply = QMessageBox.question(self, 'Подтверждение', 'Вы уверены, что хотите удалить продукт?',
+                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if self.reply == QMessageBox.StandardButton.No:
+            return
+        self.in_order = self.db.chech_product_in_order(self.product['article'])
+        if self.in_order:
+            QMessageBox.warning(self, 'Ошибка!', 'Нельзя удалить товар, который есть в заказе!')
+            return
+        self.db.delete_product(self.product['article'])
+        QMessageBox.information(self, 'Успех!', 'Продукт успешно удален')
+        self.close()
+
+    def on_photo_clicked(self, event):
+        self.reply = QMessageBox.question(self, 'Подтверждение', 'Вы уверены, что хотите изменить фотографию?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if self.reply == QMessageBox.StandardButton.No:
+            return
+        self.file_path, _ = QFileDialog.getOpenFileName(self, 'Выберите фотографию', r"C:\Users\vikim\дем 2026 пробно\picture", 'Изображения (*.png *.jpg *.jpeg)')
+        if self.file_path != '':
+            self.temp_photo_path = os.path.abspath(self.file_path)
+            self.pixmap = QPixmap(self.file_path)
+            self.photoLabel.setPixmap(self.pixmap)
+
+    def save_photo_to_project(self):
+        if not hasattr(self, 'temp_photo_path') or not self.temp_photo_path:
+            return None
+        self.pictures_dir = os.path.join(os.getcwd(), 'picture')
+        os.makedirs(self.pictures_dir, exist_ok=True)
+        self.source_path = os.path.abspath(self.temp_photo_path)
+        self.filename = os.path.basename(self.source_path)
+        self.dest_path = os.path.join(self.pictures_dir, self.filename)
+
+        # если фотография выбрана из picture
+        if os.path.dirname(self.source_path) == os.path.abspath(self.pictures_dir):
+            return self.filename
+        # если не из picture и имя выбранного файла уже есть в picture
+        if os.path.exists(self.dest_path):
+            self.reply = QMessageBox.question(self, 'Замена файла', 'Картинка с таким именем уже существует. Заменить?',
+                                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if self.reply == QMessageBox.StandardButton.No:
+                return self.filename
+            os.remove(self.dest_path)
+        shutil.copy(self.source_path, self.dest_path)
+        return self.filename
+
+if __name__ == "__main__":
+    platform_path = os.path.join(
+        os.path.dirname(sys.executable),
+        '..', 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins', 'platforms'
+    )
+    os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = platform_path
+    app = QApplication(sys.argv)
+    widget = Authorization()
+    widget.show()
+    sys.exit(app.exec())

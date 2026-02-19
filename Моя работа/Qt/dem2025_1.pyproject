@@ -1,0 +1,9 @@
+{
+    "files": [
+        "widget.py",
+        "main_window.ui",
+        "authoriz.ui",
+        "product.ui",
+        "addAndEditProduct.ui"
+    ]
+}
